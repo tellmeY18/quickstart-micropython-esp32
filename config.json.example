@@ -1,0 +1,8 @@
+{
+  "device_name": "ESP32-Dashboard",
+  "wifi_ssid": "example",
+  "wifi_password": "test",
+  "ap_ssid": "ESP32-Dashboard",
+  "ap_password": "testtttttt",
+  "web_port": 80
+}
