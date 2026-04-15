@@ -29,15 +29,13 @@
             url = "https://micropython.org/resources/firmware/ESP32_GENERIC_C3-20240602-v1.23.0.bin";
             sha256 = "sha256-gFi31utV+BJPvcx5fi6LOa6UehjfY1Vn4CyHhodMBP0=";
           };
-          # TODO: placeholder hashes — run `nix build` and replace with the correct sha256
           esp32s2 = pkgs.fetchurl {
             url = "https://micropython.org/resources/firmware/ESP32_GENERIC_S2-20240602-v1.23.0.bin";
-            sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            sha256 = "sha256-t2ExDdbS4FZ7o0SZTur34UTQdlaim8LymDnpqtM23Yk=";
           };
-          # TODO: placeholder hash — run `nix build` and replace with the correct sha256
           esp32s3 = pkgs.fetchurl {
             url = "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20240602-v1.23.0.bin";
-            sha256 = "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+            sha256 = "sha256-uRCAry6beLrUMI+Yu2GHVnyuJO13zX9I75m0evPvBVU=";
           };
         };
 
