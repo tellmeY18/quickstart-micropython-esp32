@@ -1,5 +1,5 @@
 {
-  description = "ESP32 MicroPython development environment with auto-detection";
+  description = "ESP32 MicroPython development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -54,21 +54,24 @@
             done
 
             if [ ''${#candidates[@]} -eq 0 ]; then
-              echo "ERROR: No serial device found." >&2
-              echo "  Checked: /dev/cu.usbmodem* /dev/cu.usbserial* /dev/ttyUSB* /dev/ttyACM*" >&2
-              echo "  Make sure your board is plugged in." >&2
-              echo "  Or set ESP_PORT manually:  export ESP_PORT=/dev/..." >&2
+              echo "ERROR: No serial device found. Is the board plugged in?" >&2
               exit 1
             fi
 
             if [ ''${#candidates[@]} -gt 1 ]; then
-              echo "Multiple serial devices found:" >&2
-              for c in "''${candidates[@]}"; do echo "  - $c" >&2; done
-              echo "Using: ''${candidates[0]}" >&2
-              echo "  Override with: export ESP_PORT=/dev/..." >&2
+              echo "Multiple devices found, using ''${candidates[0]}" >&2
             fi
 
             echo "''${candidates[0]}"
+          }
+
+          # ---------- require ESP_IP ----------
+          require_ip() {
+            if [ -z "''${ESP_IP:-}" ]; then
+              echo "ERROR: ESP_IP is not set. Export it with the board's IP address." >&2
+              echo "  Example: export ESP_IP=192.168.1.42" >&2
+              exit 1
+            fi
           }
 
           # ---------- chip detection ----------
@@ -77,33 +80,21 @@
             echo "Detecting chip on $port ..." >&2
             local output
             output=$(esptool --port "$port" chip_id 2>&1) || {
-              echo "ERROR: esptool failed to communicate with device on $port" >&2
-              echo "$output" >&2
-              exit 1
+              echo "ERROR: esptool failed on $port" >&2; exit 1
             }
 
-            if echo "$output" | grep -qi "ESP32-C3"; then   echo "esp32c3"
-            elif echo "$output" | grep -qi "ESP32-S3"; then echo "esp32s3"
-            elif echo "$output" | grep -qi "ESP32-S2"; then echo "esp32s2"
-            elif echo "$output" | grep -qi "ESP32-C6"; then echo "esp32c6"
-            elif echo "$output" | grep -qi "ESP32"; then    echo "esp32"
+            if echo "$output" | grep -qi "ESP32-C3"; then echo "esp32c3"
+            elif echo "$output" | grep -qi "ESP32"; then  echo "esp32"
             else
-              echo "ERROR: Could not identify chip from esptool output:" >&2
-              echo "$output" >&2
+              echo "ERROR: Unknown chip. Only ESP32 and ESP32-C3 are supported." >&2
               exit 1
             fi
           }
 
-          # ---------- chip -> firmware + offset ----------
           firmware_for_chip() {
             case "$1" in
               esp32)   echo "$FIRMWARE_ESP32";;
               esp32c3) echo "$FIRMWARE_ESP32C3";;
-              *)
-                echo "ERROR: No firmware bundled for chip '$1'." >&2
-                echo "  Supported chips: esp32, esp32c3" >&2
-                echo "  Add firmware to flake.nix to support this chip." >&2
-                exit 1;;
             esac
           }
 
@@ -114,29 +105,15 @@
             esac
           }
 
-          # ---------- mpremote wrapper (port-aware) ----------
-          mpr() {
-            local port
-            port=$(detect_port)
-            mpremote connect "$port" "$@"
-          }
-
           # ---------- commands ----------
           cmd_detect() {
             local port; port=$(detect_port)
             local chip; chip=$(detect_chip "$port")
-            echo ""
-            echo "  Port  : $port"
-            echo "  Chip  : $chip"
-            echo "  Flash : $(firmware_for_chip "$chip")"
-            echo "  Offset: $(flash_offset_for_chip "$chip")"
-            echo ""
+            echo "  Port: $port  Chip: $chip"
           }
 
           cmd_erase() {
             local port; port=$(detect_port)
-            local chip; chip=$(detect_chip "$port")
-            echo "Erasing flash on $chip @ $port ..."
             esptool --port "$port" erase_flash
           }
 
@@ -145,122 +122,76 @@
             local chip; chip=$(detect_chip "$port")
             local fw;   fw=$(firmware_for_chip "$chip")
             local off;  off=$(flash_offset_for_chip "$chip")
-            echo "Flashing $chip @ $port (offset $off) ..."
-            echo "  Firmware: $fw"
             esptool --port "$port" --baud 460800 write_flash -z "$off" "$fw"
           }
 
           cmd_monitor() {
             local port; port=$(detect_port)
-            echo "Connecting to REPL on $port (115200 baud) ..."
-            echo "  Exit: Ctrl+A then Ctrl+X"
             picocom -b 115200 "$port"
           }
 
           cmd_repl() {
-            # Interactive MicroPython REPL via mpremote (Ctrl+X to exit)
             local port; port=$(detect_port)
-            echo "Opening MicroPython REPL on $port ..."
-            echo "  Exit: Ctrl+X"
             mpremote connect "$port" repl
           }
 
           cmd_push() {
-            # esp push [file ...]  — copy one or more local files to device,
-            # preserving path structure (e.g. modules/foo.py → :modules/foo.py)
-            if [ $# -eq 0 ]; then
-              echo "Usage: esp push <file> [file ...]" >&2
-              exit 1
-            fi
+            [ $# -eq 0 ] && { echo "Usage: esp push <file> [...]" >&2; exit 1; }
             local port; port=$(detect_port)
             for f in "$@"; do
-              echo "  → $f"
-              # Ensure parent directory exists on device (ignore error if already there)
-              local dir
-              dir=$(dirname "$f")
-              if [ "$dir" != "." ]; then
-                mpremote connect "$port" mkdir :"$dir" 2>/dev/null || true
-              fi
+              local dir; dir=$(dirname "$f")
+              [ "$dir" != "." ] && mpremote connect "$port" mkdir :"$dir" 2>/dev/null || true
               mpremote connect "$port" cp "$f" :"$f"
             done
           }
 
           cmd_sync() {
-            # esp sync  — push all project source files in a SINGLE mpremote
-            # session using '+' chaining so the board never reboots mid-transfer.
-            echo "Syncing project files to device ..."
+            echo "Syncing ..."
             local port; port=$(detect_port)
+            local files=(boot.py main.py config.json gpio_api.py debuglog.py lib/microdot.py lib/websocket.py)
 
-            local files=(
-              boot.py
-              main.py
-              config.json
-              lib/microdot.py
-            )
+            mpremote connect "$port" mkdir :lib 2>/dev/null || true
 
-            # Build the chained mpremote command as an array.
-            # Start by creating the lib directory (ignore error if it exists).
-            local -a cmd=(mpremote connect "$port" mkdir :lib)
-
+            local -a cmd=(mpremote connect "$port")
+            local first=1
             for f in "''${files[@]}"; do
               if [ -f "$f" ]; then
-                echo "  → $f"
-                cmd+=(+ cp "$f" :"$f")
+                [ "$first" = 1 ] && first=0 || cmd+=(+)
+                cmd+=(cp "$f" :"$f")
               else
-                echo "  SKIP (not found): $f" >&2
+                echo "  SKIP: $f" >&2
               fi
             done
-
-            # Append a reset so the board boots fresh after the transfer.
             cmd+=(+ reset)
-
-            # Execute the whole chain in one connection — no mid-sync reboots.
             "''${cmd[@]}"
-
-            echo ""
-            echo "Sync complete."
+            echo "Done."
           }
 
           cmd_run() {
-            # esp run <script.py>  — execute a local script without copying it
-            if [ -z "''${1:-}" ]; then
-              echo "Usage: esp run <script.py>" >&2
-              exit 1
-            fi
+            [ -z "''${1:-}" ] && { echo "Usage: esp run <script.py>" >&2; exit 1; }
             local port; port=$(detect_port)
-            echo "Running $1 on device ..."
             mpremote connect "$port" run "$1"
           }
 
           cmd_ls() {
-            # esp ls [path]  — list files on device flash
             local port; port=$(detect_port)
-            local path="''${1:-/}"
-            mpremote connect "$port" ls :"$path"
+            mpremote connect "$port" ls :"''${1:-/}"
           }
 
-          # ---------- main ----------
-          usage() {
-            echo "Usage: esp <command> [args]"
-            echo ""
-            echo "Hardware:"
-            echo "  detect        Auto-detect port, chip, firmware info"
-            echo "  erase         Erase flash (run before first flash)"
-            echo "  flash         Flash MicroPython firmware"
-            echo ""
-            echo "Serial:"
-            echo "  monitor       picocom REPL (raw serial, 115200 baud)"
-            echo "  repl          mpremote REPL (friendlier, Ctrl+X to exit)"
-            echo ""
-            echo "File transfer:"
-            echo "  sync          Push all project files and reset device"
-            echo "  push <files>  Push specific file(s) and preserve path"
-            echo "  run <file>    Run a local .py without copying it"
-            echo "  ls [path]     List files on device flash"
-            echo ""
-            echo "Environment:"
-            echo "  ESP_PORT      Override auto-detected serial port"
-            echo ""
+          cmd_log() {
+            local port; port=$(detect_port)
+            case "''${1:-}" in
+              clear)
+                echo "Clearing debug.log on board..."
+                mpremote connect "$port" exec "import os; os.remove('debug.log')" 2>/dev/null \
+                  && echo "Done." \
+                  || echo "No debug.log to clear."
+                ;;
+              *)
+                mpremote connect "$port" cat :debug.log 2>/dev/null \
+                  || echo "(no debug.log found on board)"
+                ;;
+            esac
           }
 
           case "''${1:-}" in
@@ -273,7 +204,46 @@
             push)    shift; cmd_push "$@";;
             run)     shift; cmd_run "$@";;
             ls)      shift; cmd_ls "$@";;
-            *)       usage;;
+            log)     shift; cmd_log "$@";;
+            gpio)
+              shift
+              require_ip
+              [ -z "''${1:-}" ] && { echo "Usage: esp gpio <pin> [value]" >&2; exit 1; }
+              if [ -z "''${2:-}" ]; then
+                curl -s "http://$ESP_IP/api/gpio/$1" | jq
+              else
+                curl -s -X POST "http://$ESP_IP/api/gpio/$1/value" \
+                  -H 'Content-Type: application/json' \
+                  -d "{\"value\":$2}" | jq
+              fi
+              ;;
+            adc)
+              shift
+              require_ip
+              [ -z "''${1:-}" ] && { echo "Usage: esp adc <pin>" >&2; exit 1; }
+              curl -s "http://$ESP_IP/api/adc/$1" | jq
+              ;;
+            i2c)
+              shift
+              require_ip
+              case "''${1:-}" in
+                scan) curl -s "http://$ESP_IP/api/i2c/scan" | jq;;
+                *) echo "Usage: esp i2c {scan}" >&2;;
+              esac
+              ;;
+            stream)
+              shift
+              require_ip
+              if [ -n "''${1:-}" ]; then
+                IFS=',' read -ra pins <<< "$1"
+                pin_json=$(printf '%s,' "''${pins[@]}" | sed 's/,$//')
+                echo "{\"cmd\":\"stream_config\",\"pins\":[$pin_json],\"interval_ms\":100}" | \
+                  websocat "ws://$ESP_IP/ws/stream"
+              else
+                websocat "ws://$ESP_IP/ws/stream"
+              fi
+              ;;
+            *) echo "Usage: esp {detect|erase|flash|monitor|repl|sync|push|run|ls|log|gpio|adc|i2c|stream}";;
           esac
         '';
       in
@@ -283,33 +253,16 @@
             esptool
             python3
             python3Packages.pyserial
-            mpremote # file transfer + REPL
-            picocom # raw serial monitor
-            esp-helper # unified `esp` command
+            mpremote
+            picocom
+            curl
+            jq
+            websocat
+            esp-helper
           ];
 
           shellHook = ''
-            echo ""
-            echo "ESP32 MicroPython Development Environment"
-            echo "========================================="
-            echo ""
-            echo "Hardware:"
-            echo "  esp detect        show detected port, chip, firmware"
-            echo "  esp erase         erase flash (first time only)"
-            echo "  esp flash         flash MicroPython firmware"
-            echo ""
-            echo "Serial:"
-            echo "  esp monitor       raw picocom REPL"
-            echo "  esp repl          mpremote REPL (Ctrl+X to exit)"
-            echo ""
-            echo "File transfer:"
-            echo "  esp sync          push all project files + reset"
-            echo "  esp push <files>  push specific file(s)"
-            echo "  esp run <file>    run script without copying"
-            echo "  esp ls [path]     list device flash"
-            echo ""
-            echo "Override port:  export ESP_PORT=/dev/cu.usbmodem..."
-            echo ""
+            echo "ESP32 dev shell ready. Run 'esp' for commands."
           '';
         };
       }
