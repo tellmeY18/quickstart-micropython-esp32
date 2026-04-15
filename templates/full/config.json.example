@@ -1,0 +1,22 @@
+{
+  "device_name": "ESP32-Dashboard",
+  "wifi_ssid": "YOUR_SSID",
+  "wifi_password": "YOUR_PASSWORD",
+  "ap_ssid": "ESP32-Dashboard",
+  "ap_password": "12345678",
+  "web_port": 80,
+  "features": {
+    "gpio": false,
+    "adc": false,
+    "pwm": false,
+    "i2c": false,
+    "batch": false,
+    "websocket": false
+  },
+  "pin_aliases": {
+    "led": 8,
+    "relay": 5,
+    "sensor_in": 3
+  },
+  "adc_atten": "11db"
+}

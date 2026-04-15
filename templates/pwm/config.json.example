@@ -1,0 +1,11 @@
+{
+  "device_name": "ESP32-PWM",
+  "wifi_ssid": "YOUR_SSID",
+  "wifi_password": "YOUR_PASSWORD",
+  "ap_ssid": "ESP32-PWM",
+  "ap_password": "12345678",
+  "web_port": 80,
+  "pin_aliases": {
+    "led": 5
+  }
+}

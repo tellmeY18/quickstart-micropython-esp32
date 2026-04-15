@@ -1,5 +1,5 @@
 {
-  description = "ESP32 MicroPython development environment";
+  description = "ESP32 MicroPython quickstart toolkit";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -17,6 +17,9 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        # Absolute path to this repository at build time
+        repoDir = toString ./.;
+
         firmware = {
           esp32 = pkgs.fetchurl {
             url = "https://micropython.org/resources/firmware/ESP32_GENERIC-20240602-v1.23.0.bin";
@@ -26,6 +29,16 @@
             url = "https://micropython.org/resources/firmware/ESP32_GENERIC_C3-20240602-v1.23.0.bin";
             sha256 = "sha256-gFi31utV+BJPvcx5fi6LOa6UehjfY1Vn4CyHhodMBP0=";
           };
+          # TODO: placeholder hashes — run `nix build` and replace with the correct sha256
+          esp32s2 = pkgs.fetchurl {
+            url = "https://micropython.org/resources/firmware/ESP32_GENERIC_S2-20240602-v1.23.0.bin";
+            sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+          };
+          # TODO: placeholder hash — run `nix build` and replace with the correct sha256
+          esp32s3 = pkgs.fetchurl {
+            url = "https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20240602-v1.23.0.bin";
+            sha256 = "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+          };
         };
 
         esp-helper = pkgs.writeShellScriptBin "esp" ''
@@ -33,6 +46,9 @@
 
           FIRMWARE_ESP32="${firmware.esp32}"
           FIRMWARE_ESP32C3="${firmware.esp32c3}"
+          FIRMWARE_ESP32S2="${firmware.esp32s2}"
+          FIRMWARE_ESP32S3="${firmware.esp32s3}"
+          REPO_DIR="${repoDir}"
 
           # ---------- port detection ----------
           detect_port() {
@@ -83,10 +99,12 @@
               echo "ERROR: esptool failed on $port" >&2; exit 1
             }
 
-            if echo "$output" | grep -qi "ESP32-C3"; then echo "esp32c3"
+            if echo "$output" | grep -qi "ESP32-S3"; then echo "esp32s3"
+            elif echo "$output" | grep -qi "ESP32-S2"; then echo "esp32s2"
+            elif echo "$output" | grep -qi "ESP32-C3"; then echo "esp32c3"
             elif echo "$output" | grep -qi "ESP32"; then  echo "esp32"
             else
-              echo "ERROR: Unknown chip. Only ESP32 and ESP32-C3 are supported." >&2
+              echo "ERROR: Unknown chip. Supported: ESP32, ESP32-C3, ESP32-S2, ESP32-S3." >&2
               exit 1
             fi
           }
@@ -95,6 +113,8 @@
             case "$1" in
               esp32)   echo "$FIRMWARE_ESP32";;
               esp32c3) echo "$FIRMWARE_ESP32C3";;
+              esp32s2) echo "$FIRMWARE_ESP32S2";;
+              esp32s3) echo "$FIRMWARE_ESP32S3";;
             esac
           }
 
@@ -146,25 +166,56 @@
           }
 
           cmd_sync() {
-            echo "Syncing ..."
+            echo "Syncing project files ..."
             local port; port=$(detect_port)
-            local files=(boot.py main.py config.json gpio_api.py debuglog.py lib/microdot.py lib/websocket.py)
 
-            mpremote connect "$port" mkdir :lib 2>/dev/null || true
+            # Collect all .py and .json files in current directory, excluding nix/git/doc files
+            local -a files=()
+            for f in *.py *.json; do
+              [ ! -f "$f" ] && continue
+              case "$f" in
+                flake.nix|flake.lock|*.md) continue;;
+              esac
+              files+=("$f")
+            done
 
+            # Collect lib/ directory if it exists
+            local -a lib_files=()
+            if [ -d "lib" ]; then
+              for f in lib/*.py; do
+                [ -f "$f" ] && lib_files+=("$f")
+              done
+            fi
+
+            if [ ''${#files[@]} -eq 0 ] && [ ''${#lib_files[@]} -eq 0 ]; then
+              echo "ERROR: No .py or .json files found in current directory." >&2
+              echo "  Did you run 'esp init <template>' first?" >&2
+              exit 1
+            fi
+
+            echo "Files to sync:"
+            for f in "''${files[@]}"; do
+              echo "  $f"
+            done
+            for f in "''${lib_files[@]}"; do
+              echo "  $f"
+            done
+
+            # Create lib/ on device if we have lib files
+            if [ ''${#lib_files[@]} -gt 0 ]; then
+              mpremote connect "$port" mkdir :lib 2>/dev/null || true
+            fi
+
+            # Build the mpremote command chain
             local -a cmd=(mpremote connect "$port")
             local first=1
-            for f in "''${files[@]}"; do
-              if [ -f "$f" ]; then
-                [ "$first" = 1 ] && first=0 || cmd+=(+)
-                cmd+=(cp "$f" :"$f")
-              else
-                echo "  SKIP: $f" >&2
-              fi
+            for f in "''${files[@]}" "''${lib_files[@]}"; do
+              [ "$first" = 1 ] && first=0 || cmd+=(+)
+              cmd+=(cp "$f" :"$f")
             done
             cmd+=(+ reset)
             "''${cmd[@]}"
-            echo "Done."
+            echo "Done. Board reset."
           }
 
           cmd_run() {
@@ -194,19 +245,144 @@
             esac
           }
 
+          # ---------- template commands ----------
+          cmd_templates() {
+            echo "Available templates:"
+            echo "  minimal     WiFi + health-check endpoint only"
+            echo "  gpio        Digital GPIO control over HTTP"
+            echo "  sensors     ADC + I2C + internal temperature"
+            echo "  pwm         PWM output control"
+            echo "  neopixel    WS2812B RGB LED control"
+            echo "  full        Everything combined (batteries-included)"
+            echo ""
+            echo "Usage: esp init <template>"
+          }
+
+          cmd_init() {
+            local template="''${1:-}"
+            if [ -z "$template" ]; then
+              echo "Usage: esp init <template>" >&2
+              echo "" >&2
+              cmd_templates >&2
+              exit 1
+            fi
+
+            local template_dir="$REPO_DIR/templates/$template"
+            local core_dir="$REPO_DIR/core"
+
+            if [ ! -d "$template_dir" ]; then
+              echo "ERROR: Unknown template '$template'." >&2
+              echo "" >&2
+              echo "Available templates:" >&2
+              for d in "$REPO_DIR"/templates/*/; do
+                [ -d "$d" ] && echo "  $(basename "$d")" >&2
+              done
+              exit 1
+            fi
+
+            echo "Initializing from template: $template"
+            echo ""
+
+            # --- Copy core files ---
+            echo "Copying core files..."
+
+            # boot.py
+            if [ -f "$core_dir/boot.py" ]; then
+              cp "$core_dir/boot.py" ./boot.py
+              echo "  boot.py"
+            fi
+
+            # debuglog.py (from core if it exists, otherwise from template)
+            if [ -f "$core_dir/debuglog.py" ]; then
+              cp "$core_dir/debuglog.py" ./debuglog.py
+              echo "  debuglog.py"
+            elif [ -f "$template_dir/debuglog.py" ]; then
+              cp "$template_dir/debuglog.py" ./debuglog.py
+              echo "  debuglog.py (from template)"
+            fi
+
+            # lib/ directory
+            if [ -d "$core_dir/lib" ]; then
+              mkdir -p ./lib
+              for f in "$core_dir"/lib/*.py; do
+                if [ -f "$f" ]; then
+                  cp "$f" "./lib/$(basename "$f")"
+                  echo "  lib/$(basename "$f")"
+                fi
+              done
+            fi
+
+            # --- Copy template files ---
+            echo ""
+            echo "Copying template files..."
+
+            for f in "$template_dir"/*.py; do
+              if [ -f "$f" ]; then
+                local base; base=$(basename "$f")
+                # Skip debuglog.py if already copied from core
+                if [ "$base" = "debuglog.py" ] && [ -f ./debuglog.py ]; then
+                  continue
+                fi
+                cp "$f" "./$base"
+                echo "  $base"
+              fi
+            done
+
+            # --- Copy config.json.example (always) ---
+            if [ -f "$template_dir/config.json.example" ]; then
+              cp "$template_dir/config.json.example" ./config.json.example
+              echo "  config.json.example"
+            fi
+
+            # --- Copy config.json (only if it doesn't exist) ---
+            if [ ! -f ./config.json ]; then
+              if [ -f "$template_dir/config.json.example" ]; then
+                cp "$template_dir/config.json.example" ./config.json
+                echo "  config.json (created from example)"
+              fi
+            else
+              echo "  config.json already exists, skipping"
+            fi
+
+            echo ""
+            echo "=== Template '$template' initialized ==="
+            echo ""
+            echo "Next steps:"
+            echo "  1. Edit config.json with your WiFi credentials"
+            echo "  2. Run 'esp sync' to push files to the board"
+          }
+
+          # ---------- deprecation wrapper ----------
+          deprecation_notice() {
+            local cmd="$1"
+            local example="$2"
+            local doc="$3"
+            echo "" >&2
+            echo "NOTE: 'esp $cmd' is deprecated. Use curl directly:" >&2
+            echo "  $example" >&2
+            echo "  See $doc for examples." >&2
+            echo "" >&2
+          }
+
+          # ---------- main dispatch ----------
           case "''${1:-}" in
-            detect)  cmd_detect;;
-            erase)   cmd_erase;;
-            flash)   cmd_flash;;
-            monitor) cmd_monitor;;
-            repl)    cmd_repl;;
-            sync)    cmd_sync;;
-            push)    shift; cmd_push "$@";;
-            run)     shift; cmd_run "$@";;
-            ls)      shift; cmd_ls "$@";;
-            log)     shift; cmd_log "$@";;
+            detect)    cmd_detect;;
+            erase)     cmd_erase;;
+            flash)     cmd_flash;;
+            monitor)   cmd_monitor;;
+            repl)      cmd_repl;;
+            sync)      cmd_sync;;
+            push)      shift; cmd_push "$@";;
+            run)       shift; cmd_run "$@";;
+            ls)        shift; cmd_ls "$@";;
+            log)       shift; cmd_log "$@";;
+            init)      shift; cmd_init "$@";;
+            templates) cmd_templates;;
             gpio)
               shift
+              deprecation_notice "gpio" \
+                "curl -s http://\$ESP_IP/api/gpio/8 | jq" \
+                "templates/gpio/README.md"
               require_ip
               [ -z "''${1:-}" ] && { echo "Usage: esp gpio <pin> [value]" >&2; exit 1; }
               if [ -z "''${2:-}" ]; then
@@ -219,12 +395,18 @@
               ;;
             adc)
               shift
+              deprecation_notice "adc" \
+                "curl -s http://\$ESP_IP/api/adc/34 | jq" \
+                "templates/sensors/README.md"
               require_ip
               [ -z "''${1:-}" ] && { echo "Usage: esp adc <pin>" >&2; exit 1; }
               curl -s "http://$ESP_IP/api/adc/$1" | jq
               ;;
             i2c)
               shift
+              deprecation_notice "i2c" \
+                "curl -s http://\$ESP_IP/api/i2c/scan | jq" \
+                "templates/sensors/README.md"
               require_ip
               case "''${1:-}" in
                 scan) curl -s "http://$ESP_IP/api/i2c/scan" | jq;;
@@ -233,6 +415,9 @@
               ;;
             stream)
               shift
+              deprecation_notice "stream" \
+                "websocat ws://\$ESP_IP/ws/stream" \
+                "templates/full/README.md"
               require_ip
               if [ -n "''${1:-}" ]; then
                 IFS=',' read -ra pins <<< "$1"
@@ -243,7 +428,7 @@
                 websocat "ws://$ESP_IP/ws/stream"
               fi
               ;;
-            *) echo "Usage: esp {detect|erase|flash|monitor|repl|sync|push|run|ls|log|gpio|adc|i2c|stream}";;
+            *) echo "Usage: esp {detect|erase|flash|monitor|repl|sync|push|run|ls|log|init|templates}";;
           esac
         '';
       in
@@ -262,7 +447,17 @@
           ];
 
           shellHook = ''
-            echo "ESP32 dev shell ready. Run 'esp' for commands."
+            echo ""
+            echo "  ESP32 MicroPython quickstart toolkit"
+            echo "  ------------------------------------"
+            echo "  esp detect      Verify board connection"
+            echo "  esp templates   List available project templates"
+            echo "  esp init <tpl>  Scaffold a project from a template"
+            echo "  esp sync        Push project files to the board"
+            echo "  esp repl        Open MicroPython REPL"
+            echo ""
+            echo "  Run 'esp' for all commands."
+            echo ""
           '';
         };
       }
