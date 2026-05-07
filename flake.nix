@@ -39,6 +39,69 @@
           };
         };
 
+        # Meshtastic firmware v2.7.15 (latest stable)
+        meshtastic-version = "2.7.15.567b8ea";
+        meshtastic-tag = "v2.7.15.567b8ea";
+
+        meshtastic-firmware = {
+          esp32 =
+            pkgs.runCommand "meshtastic-fw-esp32"
+              {
+                src = pkgs.fetchurl {
+                  url = "https://github.com/meshtastic/firmware/releases/download/${meshtastic-tag}/firmware-esp32-${meshtastic-version}.zip";
+                  sha256 = "7ee73fe1f351156a53c99e9b34e25a318271745ef4617540d252d49a75a2598e";
+                };
+                nativeBuildInputs = [ pkgs.unzip ];
+              }
+              ''
+                mkdir -p $out
+                cd $out
+                unzip $src
+              '';
+          esp32c3 =
+            pkgs.runCommand "meshtastic-fw-esp32c3"
+              {
+                src = pkgs.fetchurl {
+                  url = "https://github.com/meshtastic/firmware/releases/download/${meshtastic-tag}/firmware-esp32c3-${meshtastic-version}.zip";
+                  sha256 = "d7893fdd3149ade63039a430e6530f650bf50d900a1f4578ae663efce8f1671b";
+                };
+                nativeBuildInputs = [ pkgs.unzip ];
+              }
+              ''
+                mkdir -p $out
+                cd $out
+                unzip $src
+              '';
+          esp32c6 =
+            pkgs.runCommand "meshtastic-fw-esp32c6"
+              {
+                src = pkgs.fetchurl {
+                  url = "https://github.com/meshtastic/firmware/releases/download/${meshtastic-tag}/firmware-esp32c6-${meshtastic-version}.zip";
+                  sha256 = "a1e0daafe70d2bb8f8841f0b9159296618fd9b0273b42d8247efc80a2fec2ae1";
+                };
+                nativeBuildInputs = [ pkgs.unzip ];
+              }
+              ''
+                mkdir -p $out
+                cd $out
+                unzip $src
+              '';
+          esp32s3 =
+            pkgs.runCommand "meshtastic-fw-esp32s3"
+              {
+                src = pkgs.fetchurl {
+                  url = "https://github.com/meshtastic/firmware/releases/download/${meshtastic-tag}/firmware-esp32s3-${meshtastic-version}.zip";
+                  sha256 = "ac39f8b6517feb7bf6a6d173c46fca808680723e8bc4544edb3185e31398acdc";
+                };
+                nativeBuildInputs = [ pkgs.unzip ];
+              }
+              ''
+                mkdir -p $out
+                cd $out
+                unzip $src
+              '';
+        };
+
         esp-helper = pkgs.writeShellScriptBin "esp" ''
           set -euo pipefail
 
@@ -47,6 +110,12 @@
           FIRMWARE_ESP32S2="${firmware.esp32s2}"
           FIRMWARE_ESP32S3="${firmware.esp32s3}"
           REPO_DIR="${repoDir}"
+
+          MESHTASTIC_VERSION="${meshtastic-version}"
+          MESH_FW_ESP32="${meshtastic-firmware.esp32}"
+          MESH_FW_ESP32C3="${meshtastic-firmware.esp32c3}"
+          MESH_FW_ESP32C6="${meshtastic-firmware.esp32c6}"
+          MESH_FW_ESP32S3="${meshtastic-firmware.esp32s3}"
 
           # ---------- port detection ----------
           detect_port() {
@@ -120,6 +189,16 @@
             case "$1" in
               esp32) echo "0x1000";;
               *)     echo "0x0";;
+            esac
+          }
+
+          mesh_fw_for_chip() {
+            case "$1" in
+              esp32)   echo "$MESH_FW_ESP32";;
+              esp32c3) echo "$MESH_FW_ESP32C3";;
+              esp32c6) echo "$MESH_FW_ESP32C6";;
+              esp32s3) echo "$MESH_FW_ESP32S3";;
+              *) echo ""; return 1;;
             esac
           }
 
@@ -241,6 +320,152 @@
                   || echo "(no debug.log found on board)"
                 ;;
             esac
+          }
+
+          # ---------- meshtastic commands ----------
+          cmd_mesh_boards() {
+            local port; port=$(detect_port)
+            local chip; chip=$(detect_chip "$port")
+            local fw_dir; fw_dir=$(mesh_fw_for_chip "$chip")
+            if [ -z "$fw_dir" ]; then
+              echo "ERROR: No Meshtastic firmware available for chip '$chip'." >&2
+              exit 1
+            fi
+            echo "Available Meshtastic boards for $chip (v$MESHTASTIC_VERSION):"
+            echo ""
+            for f in "$fw_dir"/firmware-*-"''${MESHTASTIC_VERSION}".bin; do
+              [ -f "$f" ] || continue
+              local base; base=$(basename "$f")
+              local board; board=$(echo "$base" | sed "s/^firmware-//;s/-''${MESHTASTIC_VERSION}\.bin$//")
+              echo "  $board"
+            done
+          }
+
+          cmd_mesh_flash() {
+            local board="''${1:-}"
+            if [ -z "$board" ]; then
+              echo "Usage: esp mesh flash <board>" >&2
+              echo "" >&2
+              echo "Run 'esp mesh boards' to see available boards." >&2
+              exit 1
+            fi
+
+            local port; port=$(detect_port)
+            local chip; chip=$(detect_chip "$port")
+            local fw_dir; fw_dir=$(mesh_fw_for_chip "$chip")
+            if [ -z "$fw_dir" ]; then
+              echo "ERROR: No Meshtastic firmware available for chip '$chip'." >&2
+              exit 1
+            fi
+
+            # Find the factory binary
+            local factory_bin="$fw_dir/firmware-''${board}-''${MESHTASTIC_VERSION}.bin"
+            if [ ! -f "$factory_bin" ]; then
+              echo "ERROR: No firmware found for board '$board' on chip '$chip'." >&2
+              echo "" >&2
+              echo "Available boards for $chip:" >&2
+              for f in "$fw_dir"/firmware-*-"''${MESHTASTIC_VERSION}".bin; do
+                [ -f "$f" ] || continue
+                local b; b=$(basename "$f" | sed "s/^firmware-//;s/-''${MESHTASTIC_VERSION}\.bin$//")
+                echo "  $b" >&2
+              done
+              exit 1
+            fi
+
+            # Find metadata JSON
+            local meta_json="$fw_dir/firmware-''${board}-''${MESHTASTIC_VERSION}.mt.json"
+            local ota_offset="0x260000"
+            local spiffs_offset="0x300000"
+            local mcu="$chip"
+
+            if [ -f "$meta_json" ]; then
+              ota_offset=$(jq -r '.part[] | select(.subtype == "ota_1") | .offset' "$meta_json" 2>/dev/null || echo "0x260000")
+              spiffs_offset=$(jq -r '.part[] | select(.subtype == "spiffs") | .offset' "$meta_json" 2>/dev/null || echo "0x300000")
+              mcu=$(jq -r '.mcu // empty' "$meta_json" 2>/dev/null || echo "$chip")
+            fi
+
+            # Find OTA binary
+            local ota_bin="$fw_dir/bleota.bin"
+
+            # Find LittleFS binary
+            local littlefs_bin="$fw_dir/littlefs-''${board}-''${MESHTASTIC_VERSION}.bin"
+
+            echo ""
+            echo "  WARNING: Do NOT power on a Meshtastic device without an antenna attached!"
+            echo ""
+            echo "  Flashing Meshtastic firmware for board: $board"
+            echo "  Chip: $chip | Firmware: v$MESHTASTIC_VERSION"
+            echo ""
+            echo "  Factory:  $(basename "$factory_bin")"
+            [ -f "$ota_bin" ] && echo "  OTA:      $(basename "$ota_bin") @ $ota_offset"
+            [ -f "$littlefs_bin" ] && echo "  LittleFS: $(basename "$littlefs_bin") @ $spiffs_offset"
+            echo ""
+            echo "  This will ERASE all existing firmware (MicroPython or otherwise)."
+            echo ""
+
+            # Step 1: Erase
+            echo "Step 1/4: Erasing flash..."
+            esptool --port "$port" erase_flash
+
+            # Step 2: Write factory firmware
+            echo "Step 2/4: Writing factory firmware..."
+            esptool --port "$port" --baud 460800 write_flash 0x00 "$factory_bin"
+
+            # Step 3: Write OTA (if available)
+            if [ -f "$ota_bin" ]; then
+              echo "Step 3/4: Writing OTA partition..."
+              esptool --port "$port" --baud 460800 write_flash "$ota_offset" "$ota_bin"
+            else
+              echo "Step 3/4: Skipping OTA (not found)"
+            fi
+
+            # Step 4: Write LittleFS (if available)
+            if [ -f "$littlefs_bin" ]; then
+              echo "Step 4/4: Writing LittleFS..."
+              esptool --port "$port" --baud 460800 write_flash "$spiffs_offset" "$littlefs_bin"
+            else
+              echo "Step 4/4: Skipping LittleFS (not found)"
+            fi
+
+            echo ""
+            echo "=== Meshtastic firmware flashed successfully ==="
+            echo ""
+            echo "Next steps:"
+            echo "  1. Attach antenna before powering on!"
+            echo "  2. Configure via Meshtastic app (BLE) or:"
+            echo "     esp mesh config --info"
+            echo "  3. Set your region: esp mesh config --set lora.region US"
+          }
+
+          cmd_mesh_info() {
+            echo "Meshtastic firmware: v$MESHTASTIC_VERSION"
+            echo ""
+            echo "Pinned architectures:"
+            echo "  esp32    $MESH_FW_ESP32"
+            echo "  esp32c3  $MESH_FW_ESP32C3"
+            echo "  esp32c6  $MESH_FW_ESP32C6"
+            echo "  esp32s3  $MESH_FW_ESP32S3"
+            echo ""
+            echo "Run 'esp mesh boards' to list available boards for your connected device."
+          }
+
+          cmd_mesh_config() {
+            if ! command -v meshtastic &>/dev/null; then
+              echo "ERROR: 'meshtastic' CLI not found." >&2
+              echo "  Install it with: pip install meshtastic" >&2
+              exit 1
+            fi
+            local port; port=$(detect_port)
+            if [ $# -eq 0 ]; then
+              echo "Usage: esp mesh config [meshtastic CLI args...]" >&2
+              echo "" >&2
+              echo "Examples:" >&2
+              echo "  esp mesh config --info" >&2
+              echo "  esp mesh config --set lora.region US" >&2
+              echo "  esp mesh config --get" >&2
+              exit 1
+            fi
+            meshtastic --port "$port" "$@"
           }
 
           # ---------- template commands ----------
@@ -426,7 +651,17 @@
                 websocat "ws://$ESP_IP/ws/stream"
               fi
               ;;
-            *) echo "Usage: esp {detect|erase|flash|monitor|repl|sync|push|run|ls|log|init|templates}";;
+            mesh)
+              shift
+              case "''${1:-}" in
+                boards)  cmd_mesh_boards;;
+                flash)   shift; cmd_mesh_flash "$@";;
+                info)    cmd_mesh_info;;
+                config)  shift; cmd_mesh_config "$@";;
+                *) echo "Usage: esp mesh {boards|flash|info|config}" >&2;;
+              esac
+              ;;
+            *) echo "Usage: esp {detect|erase|flash|monitor|repl|sync|push|run|ls|log|init|templates|mesh}";;
           esac
         '';
       in
@@ -453,6 +688,7 @@
             echo "  esp init <tpl>  Scaffold a project from a template"
             echo "  esp sync        Push project files to the board"
             echo "  esp repl        Open MicroPython REPL"
+            echo "  esp mesh        Meshtastic firmware commands"
             echo ""
             echo "  Run 'esp' for all commands."
             echo ""

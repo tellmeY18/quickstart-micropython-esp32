@@ -27,6 +27,7 @@ The goal: a developer plugs in any ESP-32 board, runs `nix develop && esp flash`
 - [Milestone 10 — Documentation](#milestone-10--documentation)
 - [Milestone 11 — Multi-Board Support](#milestone-11--multi-board-support)
 - [Milestone 12 — Polish & Release](#milestone-12--polish--release)
+- [Milestone 13 — Meshtastic Firmware Support](#milestone-13--meshtastic-firmware-support)
 - [Dependency Graph](#dependency-graph)
 
 ---
@@ -1343,6 +1344,136 @@ None modified — originals remain.
 
 ---
 
+## Milestone 13 — Meshtastic Firmware Support
+
+**Description:** Extend the toolkit to flash Meshtastic firmware (LoRa mesh networking) in
+addition to MicroPython. This adds `esp mesh` subcommands for listing boards, flashing firmware,
+and basic configuration. The same Nix dev shell and `esptool` are reused — no additional
+toolchain installation needed.
+
+Meshtastic firmware is distributed as architecture-specific ZIP archives on GitHub, each containing
+board-specific `.factory.bin` files (e.g., `firmware-heltec-v3-2.5.x.factory.bin`), OTA binaries,
+LittleFS images, and metadata JSON with partition offsets. The flash process writes three binaries
+at three different offsets, driven by the metadata.
+
+### Background
+
+| Concept | Detail |
+|---|---|
+| **Firmware source** | GitHub releases: `meshtastic/firmware` |
+| **Archive format** | `firmware-{arch}-{version}.zip` (one ZIP per chip architecture) |
+| **ZIP contents** | `firmware-{board}-{ver}.factory.bin`, `mt-{mcu}-ota.bin`, `littlefs-{board}-{ver}.bin`, `firmware-{board}-{ver}.mt.json` |
+| **Flash offsets** | Factory at `0x00`, OTA offset from `.mt.json`, LittleFS offset from `.mt.json` |
+| **Post-flash config** | Meshtastic app (BLE), `meshtastic` Python CLI, or web UI at `meshtastic.local` |
+
+### Tasks
+
+#### Nix Firmware Pinning
+
+- [ ] Choose a stable Meshtastic firmware release version to pin (check https://meshtastic.org/downloads/)
+- [ ] Add `meshtastic-firmware` attribute set to `flake.nix` with `pkgs.fetchzip` entries:
+  - [ ] `meshtastic-firmware.esp32` — `firmware-esp32-{version}.zip`
+  - [ ] `meshtastic-firmware.esp32s3` — `firmware-esp32s3-{version}.zip`
+  - [ ] `meshtastic-firmware.esp32c3` — `firmware-esp32c3-{version}.zip`
+  - [ ] `meshtastic-firmware.esp32c6` — `firmware-esp32c6-{version}.zip`
+- [ ] Use `fetchzip` with `stripRoot = false` (firmware ZIPs have flat directory layout)
+- [ ] Add `meshtastic` Python package to `buildInputs` (for post-flash configuration via serial/BLE)
+- [ ] Set shell variable `MESHTASTIC_FW_VERSION` for display in `esp mesh info`
+
+#### CLI Commands — `esp mesh` subcommand group
+
+- [ ] Add `cmd_mesh_boards` function:
+  - [ ] Auto-detect chip with existing `detect_chip` function
+  - [ ] Select the correct firmware directory for the detected architecture
+  - [ ] List all `firmware-*-*.factory.bin` files, extracting board names
+  - [ ] Pretty-print board names with architecture info
+- [ ] Add `cmd_mesh_flash` function:
+  - [ ] Accept `<board>` argument (e.g., `heltec-v3`, `tbeam-s3-core`)
+  - [ ] Auto-detect chip and select firmware directory
+  - [ ] Locate `firmware-{board}-{ver}.factory.bin` in the firmware directory
+  - [ ] Read `firmware-{board}-{ver}.mt.json` for OTA and SPIFFS offsets
+  - [ ] Locate `mt-{mcu}-ota.bin` (unified OTA binary per MCU)
+  - [ ] Locate `littlefs-{board}-{ver}.bin`
+  - [ ] Validate all three files exist before starting
+  - [ ] Run: `esptool erase_flash`
+  - [ ] Run: `esptool write_flash 0x00 {factory.bin}`
+  - [ ] Run: `esptool write_flash {ota_offset} {ota.bin}`
+  - [ ] Run: `esptool write_flash {spiffs_offset} {littlefs.bin}`
+  - [ ] Print success message with next steps (configure via app or CLI)
+- [ ] Add `cmd_mesh_info` function:
+  - [ ] Print pinned Meshtastic firmware version
+  - [ ] Print supported architectures
+  - [ ] Print path to firmware directory (for advanced users)
+- [ ] Add `cmd_mesh_config` function:
+  - [ ] Wrapper around `meshtastic` Python CLI
+  - [ ] Auto-detect port
+  - [ ] Pass through any additional arguments to `meshtastic` CLI
+  - [ ] Example: `esp mesh config --set lora.region US`
+- [ ] Add `mesh)` case to main dispatch in `esp` CLI:
+  - [ ] Route `esp mesh boards` → `cmd_mesh_boards`
+  - [ ] Route `esp mesh flash <board>` → `cmd_mesh_flash`
+  - [ ] Route `esp mesh info` → `cmd_mesh_info`
+  - [ ] Route `esp mesh config [args...]` → `cmd_mesh_config`
+- [ ] Update `esp` usage line to include `mesh` subcommand
+
+#### Safety & UX
+
+- [ ] Add warning before `esp mesh flash` that this will overwrite MicroPython (or any existing firmware)
+- [ ] Add antenna warning: "Do NOT power on a Meshtastic device without an antenna attached!"
+- [ ] Validate board name against available firmware files; suggest closest match on typo
+- [ ] Handle case where detected chip doesn't match board's expected chip (e.g., trying to flash `heltec-v3` on an ESP32-C3)
+
+#### Documentation
+
+- [ ] Add `docs/meshtastic.md`:
+  - [ ] What is Meshtastic and why it's supported
+  - [ ] Quick start: flash + configure
+  - [ ] Board selection guide (how to identify your board)
+  - [ ] Common configuration examples (region, channel, etc.)
+  - [ ] Switching between MicroPython and Meshtastic on the same board
+  - [ ] Updating to a newer Meshtastic firmware version (changing the pin in flake.nix)
+  - [ ] Troubleshooting: flash failures, boot loops, antenna warnings
+- [ ] Update `CLAUDE.md` with Meshtastic section (CLI commands, board table, design rationale)
+- [ ] Update `README.md` to mention Meshtastic support
+- [ ] Update dev shell banner to mention `esp mesh` commands
+
+#### Testing
+
+- [ ] Test `esp mesh boards` shows correct board list for detected architecture
+- [ ] Test `esp mesh flash <board>` succeeds on at least one ESP32-S3 board (e.g., Heltec V3)
+- [ ] Test `esp mesh info` displays correct version
+- [ ] Test `esp mesh config --info` passes through to meshtastic CLI correctly
+- [ ] Test re-flashing MicroPython after Meshtastic (verify `esp erase && esp flash` still works)
+- [ ] Test error handling: wrong board name, missing firmware, chip mismatch
+
+### Files Touched
+
+- `flake.nix` — add Meshtastic firmware pinning, `meshtastic` Python package, `esp mesh` CLI commands
+- `CLAUDE.md` — add Meshtastic section
+- `README.md` — mention Meshtastic support
+
+### Files Created
+
+- `docs/meshtastic.md` — Meshtastic-specific documentation
+
+### Dependencies
+
+- Milestone 9 (CLI must be stable — `detect_port`, `detect_chip`, `erase` must work)
+- Milestone 11 (multi-board chip detection must support S2/S3/C3/C6)
+- Independent of all template milestones (M2–M8) — Meshtastic doesn't use MicroPython templates
+
+### Definition of Done
+
+- [ ] `esp mesh boards` lists available boards for the detected chip
+- [ ] `esp mesh flash heltec-v3` (or another board) successfully flashes all 3 partitions
+- [ ] `esp mesh info` shows pinned firmware version
+- [ ] `esp mesh config --info` displays device info after flashing
+- [ ] `docs/meshtastic.md` exists and covers quick start + board selection
+- [ ] Re-flashing MicroPython after Meshtastic works (`esp erase && esp flash`)
+- [ ] Dev shell banner mentions Meshtastic support
+
+---
+
 ## Dependency Graph
 
 ```
@@ -1370,13 +1501,16 @@ Milestone 1 (Restructure)
                            ▼
                     Milestone 9 (CLI)
                            │
-                           ▼
-                    Milestone 10 (Docs)
-                           │
-                           ▼
-                    Milestone 11 (Multi-Board)
-                           │
-                           ▼
+                     ┌─────┴─────┐
+                     ▼           ▼
+              Milestone 10   Milestone 13
+              (Docs)         (Meshtastic)
+                     │           │
+                     ▼           │
+              Milestone 11      │
+              (Multi-Board)     │
+                     │           │
+                     ▼           ▼
                     Milestone 12 (Release)
 ```
 
@@ -1388,6 +1522,8 @@ Milestone 1 (Restructure)
 - Milestones 3–8 can all proceed in parallel once M1 and M2 are done
 
 **Critical path:** M0 → M1 → M2 → M9 → M10 → M11 → M12
+
+**Independent tracks:** Milestone 13 (Meshtastic) can proceed in parallel with Milestones 10–11 once M9 is complete. It only requires stable CLI infrastructure and multi-chip detection.
 
 **Estimated effort:** Each template milestone (M2–M7) is approximately 2–4 hours of implementation and testing. M8 (examples) is ~3 hours. M9 (CLI) is ~4 hours. M10 (docs) is ~6 hours. M11 (multi-board) depends on hardware availability. M12 (release) is ~2 hours.
 

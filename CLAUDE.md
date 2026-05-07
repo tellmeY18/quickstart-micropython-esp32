@@ -175,6 +175,68 @@ export ESP_PORT=/dev/cu.usbmodem14101
 | ESP32-S2 | `ESP32_GENERIC_S2-20240602-v1.23.0.bin` | `0x0` | ✅ Supported |
 | ESP32-S3 | `ESP32_GENERIC_S3-20240602-v1.23.0.bin` | `0x0` | ✅ Supported |
 
+### Meshtastic Firmware Support
+
+In addition to MicroPython, the toolkit supports flashing **Meshtastic** firmware — an open-source
+LoRa mesh networking platform. This lets you use the same `nix develop` environment and `esp` CLI
+to flash either MicroPython (for custom IoT projects) or Meshtastic (for off-grid mesh comms).
+
+#### How It Works
+
+Meshtastic firmware is fundamentally different from MicroPython:
+
+| | MicroPython | Meshtastic |
+|---|---|---|
+| **What it is** | Python interpreter on hardware | Compiled C++ mesh radio firmware |
+| **Firmware granularity** | One `.bin` per chip (ESP32, C3, S3…) | One `.factory.bin` per **board** (heltec-v3, tbeam, t-deck…) |
+| **Flash process** | Single binary at one offset | Three binaries: factory + OTA + LittleFS at metadata-driven offsets |
+| **Post-flash workflow** | Push `.py` files via `esp sync` | Configure via BLE app or `meshtastic` Python CLI |
+| **Configuration** | `config.json` on flash filesystem | Protobuf settings over BLE/serial |
+
+#### Meshtastic CLI Commands
+
+| Command | Description |
+|---|---|
+| `esp mesh flash <board>` | Flash Meshtastic firmware for a specific board (e.g., `heltec-v3`) |
+| `esp mesh boards` | List available board targets from the pinned firmware |
+| `esp mesh info` | Show pinned Meshtastic firmware version |
+| `esp mesh config` | Open Meshtastic Python CLI for device configuration |
+
+#### Meshtastic Quick Start
+
+```sh
+nix develop                        # 1. Enter dev shell
+esp detect                         # 2. Verify board connection
+esp erase                          # 3. Erase flash
+esp mesh boards                    # 4. List available boards
+esp mesh flash heltec-v3           # 5. Flash Meshtastic for your board
+# configure via Meshtastic app or: meshtastic --set lora.region US
+```
+
+#### Supported Meshtastic Boards (ESP32-based)
+
+The firmware ZIPs are pinned per architecture. Popular ESP32-based boards include:
+
+| Board | Chip | Notable Features |
+|---|---|---|
+| `heltec-v3` | ESP32-S3 | Built-in OLED, SX1262 LoRa |
+| `tbeam-s3-core` | ESP32-S3 | GPS, 18650 battery holder |
+| `t-deck` | ESP32-S3 | Keyboard + screen |
+| `station-g2` | ESP32-S3 | High-power (1W) transceiver |
+| `tlora-t3s3-v1` | ESP32-S3 | Budget-friendly with SX1262 |
+
+> **Note:** The full list of boards depends on the pinned firmware version. Run `esp mesh boards`
+> to see all available targets for your architecture.
+
+#### Design: Why Both Firmwares?
+
+Many ESP32 developers work with **both** MicroPython (for custom sensor/control projects) and
+Meshtastic (for LoRa mesh networking). Having both in one Nix flake means:
+- One `nix develop` — no separate toolchain installs
+- Same `esptool` version for both — no version conflicts
+- Same port detection logic — `esp detect` works for either
+- Easy switching — reflash between MicroPython and Meshtastic on the same board
+
 ---
 
 ## Shared Core Files
